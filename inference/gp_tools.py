@@ -125,12 +125,7 @@ class GpRegressor(object):
             standard deviations.
         """
         if theta is not None:
-            t = [exp(h) for h in theta]
-            self.a = t[0]
-            self.s = array(t[1:])
-            self.K_xx = self.build_covariance(self.a, self.s*self.scale_lengths)
-            self.L = cholesky(self.K_xx)
-            self.H = solve_triangular(self.L.T, solve_triangular(self.L, self.y, lower = True))
+            self.set_hyperparameters(theta)
 
         lengths = self.s * self.scale_lengths
 
@@ -147,6 +142,14 @@ class GpRegressor(object):
             errs.append( self.a**2 - npsum(v**2) )
 
         return array(mu_q), sqrt( abs(array(errs)) )
+
+    def set_hyperparameters(self, theta):
+        t = [exp(h) for h in theta]
+        self.a = t[0]
+        self.s = array(t[1:])
+        self.K_xx = self.build_covariance(self.a, self.s * self.scale_lengths)
+        self.L = cholesky(self.K_xx)
+        self.H = solve_triangular(self.L.T, solve_triangular(self.L, self.y, lower=True))
 
     def gradient(self, q):
         """
@@ -536,10 +539,14 @@ class GpOptimiser(object):
         argument is not specified the errors are taken to be small but non-zero.
 
     :keyword bounds: \
-        A iterable containing tuples which specify for the upper and lower bounds
+        A iterable containing tuples which specify the upper and lower bounds
         for the optimisation in each dimension in the format (lower_bound, upper_bound).
+
+    :param hyperpars: \
+        Hyper-parameters used by the GP-regression estimate. See the documentation of
+        the *hyperpars* keyword of the GpRegressor class for more details.
     """
-    def __init__(self, x, y, y_err = None, bounds = None):
+    def __init__(self, x, y, y_err = None, bounds = None, hyperpars = None):
         self.x = list(x)
         self.y = list(y)
         self.y_err = y_err
@@ -550,9 +557,10 @@ class GpOptimiser(object):
         else:
             self.bounds = bounds
 
-        self.gp = GpRegressor(x, y, y_err=y_err)
+        self.gp = GpRegressor(x, y, y_err=y_err, hyperpars=hyperpars)
 
         self.ir2pi = 1 / sqrt(2*pi)
+        self.ir2 = 1. / sqrt(2.)
         self.mu_max = max(self.y)
         self.expected_fractional_improvement_history = []
 
@@ -586,7 +594,7 @@ class GpOptimiser(object):
         return -sig**2
 
     def maximise_aquisition(self, aq_func):
-        opt_result = differential_evolution(aq_func, self.bounds)
+        opt_result = differential_evolution(aq_func, self.bounds, popsize = 30)
         return opt_result.x, opt_result.fun
 
     def learn_function(self):
@@ -615,4 +623,4 @@ class GpOptimiser(object):
        return exp(-0.5*z**2)*self.ir2pi
 
     def normal_cdf(self,z):
-        return 0.5*(1 + erf(z/sqrt(2)))
+        return 0.5*(1. + erf(z*self.ir2))
