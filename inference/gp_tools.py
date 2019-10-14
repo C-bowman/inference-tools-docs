@@ -173,7 +173,7 @@ class GpRegressor(object):
 
     :param hyperpars: \
         An array specifying the hyper-parameter values to be used by the
-        covariance function class, which by default is SquaredExponential.
+        covariance function class, which by default is ``SquaredExponential``.
         See the documentation for the relevant covariance function class for
         a description of the required hyper-parameters. Generally this argument
         should be left unspecified, in which case the hyper-parameters will be
@@ -631,10 +631,23 @@ class GpOptimiser(object):
         for the optimisation in each dimension in the format (lower_bound, upper_bound).
 
     :param hyperpars: \
-        Hyper-parameters used by the GP-regression estimate. See the documentation of
-        the *hyperpars* keyword of the GpRegressor class for more details.
+        An array specifying the hyper-parameter values to be used by the
+        covariance function class, which by default is ``SquaredExponential``.
+        See the documentation for the relevant covariance function class for
+        a description of the required hyper-parameters. Generally this argument
+        should be left unspecified, in which case the hyper-parameters will be
+        selected automatically.
+
+    :param class kernel: \
+        The covariance function class which will be used to model the data. The
+        covariance function classes can be imported from the gp_tools module and
+        then passed to ``GpOptimiser`` using this keyword argument.
+
+    :param bool cross_val: \
+        If set to `True`, leave-one-out cross-validation is used to select the
+        hyper-parameters in place of the marginal likelihood.
     """
-    def __init__(self, x, y, y_err = None, bounds = None, hyperpars = None):
+    def __init__(self, x, y, y_err = None, bounds = None, hyperpars = None, kernel = SquaredExponential, cross_val = False):
         self.x = list(x)
         self.y = list(y)
         self.y_err = y_err
@@ -645,7 +658,9 @@ class GpOptimiser(object):
         else:
             self.bounds = bounds
 
-        self.gp = GpRegressor(x, y, y_err=y_err, hyperpars=hyperpars)
+        self.kernel = kernel
+        self.cross_val = cross_val
+        self.gp = GpRegressor(x, y, y_err=y_err, hyperpars=hyperpars, kernel = kernel, cross_val = cross_val)
 
         self.ir2pi = 1 / sqrt(2*pi)
         self.ir2 = 1. / sqrt(2.)
@@ -674,7 +689,7 @@ class GpOptimiser(object):
                 raise ValueError('y_err must be specified for new evaluations if y_err was specified during __init__')
 
         # re-train the GP
-        self.gp = GpRegressor(self.x, self.y, y_err=self.y_err)
+        self.gp = GpRegressor(self.x, self.y, y_err=self.y_err, kernel = self.kernel, cross_val = self.cross_val)
         self.mu_max = max(self.y)
 
     def variance_aq(self,x):
