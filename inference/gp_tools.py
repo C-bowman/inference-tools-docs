@@ -17,21 +17,19 @@ from itertools import product
 
 class SquaredExponential(object):
     r"""
-    SquaredExponential is a covariance-function class which can be passed to
-    GpRegressor via the 'kernel' keyword argument. It uses the 'squared-exponential'
+    ``SquaredExponential`` is a covariance-function class which can be passed to
+    ``GpRegressor`` via the ``kernel`` keyword argument. It uses the 'squared-exponential'
     covariance function given by:
 
     .. math::
 
-       K(\underline{u}, \underline{v}) = a^2 \exp \left( -\frac{1}{2} \sum_i \left(\frac{u_i - v_i}{l_i}\right)^2 \right)
+       K(\underline{u}, \underline{v}) = a^2 \exp \left( -\frac{1}{2} \sum_{i=1}^{n} \left(\frac{u_i - v_i}{l_i}\right)^2 \right)
 
-    The hyperparameters required by Squared exponential are as follows:
+    The hyper-parameters required by ``SquaredExponential`` are as follows:
 
-    For a problem with N spatial dimensions, SquaredExponential has N+1 hyper-parameters.
-    For some array of hyper-parameters 'h':
+    .. math::
 
-        - h[0] is the natural log of the standard deviation parameter.
-        - h[1:] are the natural log of the scale-lengths for each of the N spatial dimensions.
+       \underline{\theta} = [ \ln{a}, \ln{l_1}, \ldots, \ln{l_n}]
     """
     def __init__(self, x, y):
         # pre-calculates hyperparameter-independent part of the
@@ -84,17 +82,20 @@ class SquaredExponential(object):
 
 
 class RationalQuadratic(object):
-    """
-    RationalQuadratic is a covariance-function class which can be passed to
-    GpRegressor via the 'kernel' keyword argument. The hyperparameters required
-    by RationalQuadratic are as follows:
+    r"""
+    ``RationalQuadratic`` is a covariance-function class which can be passed to
+    ``GpRegressor`` via the ``kernel`` keyword argument. It uses the 'rational quadratic'
+    covariance function given by:
 
-    For a problem with N spatial dimensions, SquaredExponential has N+2 hyper-parameters.
-    For some array of hyper-parameters 'h':
+    .. math::
 
-    h[0] is the natural log of the standard deviation parameter.
-    h[1] is the natural log of the exponent parameter.
-    h[2:] are the natural log of the scale-lengths for each of the N spatial dimensions.
+       K(\underline{u}, \underline{v}) = a^2 \left( 1 + \frac{1}{2\alpha} \sum_{i=1}^{n} \left(\frac{u_i - v_i}{l_i}\right)^2 \right)^{-\alpha}
+
+    The hyper-parameters required by ``RationalQuadratic`` are as follows:
+
+    .. math::
+
+       \underline{\theta} = [ \ln{a}, \ln{\alpha}, \ln{l_1}, \ldots, \ln{l_n}]
     """
     def __init__(self, x, y):
         # pre-calculates hyperparameter-independent part of the
