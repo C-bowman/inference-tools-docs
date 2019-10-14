@@ -23,13 +23,14 @@ class SquaredExponential(object):
 
     .. math::
 
-       K(\underline{u}, \underline{v}) = a^2 \exp \left( -\frac{1}{2} \sum_{i=1}^{n} \left(\frac{u_i - v_i}{l_i}\right)^2 \right)
+       K(\underline{u}, \underline{v}) = A^2 \exp \left( -\frac{1}{2} \sum_{i=1}^{n} \left(\frac{u_i - v_i}{l_i}\right)^2 \right)
 
-    The hyper-parameters required by ``SquaredExponential`` are as follows:
+    The hyper-parameter vector :math:`\underline{\theta}` used by ``SquaredExponential`` to define
+    the above function is structured as follows:
 
     .. math::
 
-       \underline{\theta} = [ \ln{a}, \ln{l_1}, \ldots, \ln{l_n}]
+       \underline{\theta} = [ \ln{A}, \ln{l_1}, \ldots, \ln{l_n}]
     """
     def __init__(self, x, y):
         # pre-calculates hyperparameter-independent part of the
@@ -89,13 +90,14 @@ class RationalQuadratic(object):
 
     .. math::
 
-       K(\underline{u}, \underline{v}) = a^2 \left( 1 + \frac{1}{2\alpha} \sum_{i=1}^{n} \left(\frac{u_i - v_i}{l_i}\right)^2 \right)^{-\alpha}
+       K(\underline{u}, \underline{v}) = A^2 \left( 1 + \frac{1}{2\alpha} \sum_{i=1}^{n} \left(\frac{u_i - v_i}{l_i}\right)^2 \right)^{-\alpha}
 
-    The hyper-parameters required by ``RationalQuadratic`` are as follows:
+    The hyper-parameter vector :math:`\underline{\theta}` used by ``RationalQuadratic`` to define
+    the above function is structured as follows:
 
     .. math::
 
-       \underline{\theta} = [ \ln{a}, \ln{\alpha}, \ln{l_1}, \ldots, \ln{l_n}]
+       \underline{\theta} = [ \ln{A}, \ln{\alpha}, \ln{l_1}, \ldots, \ln{l_n}]
     """
     def __init__(self, x, y):
         # pre-calculates hyperparameter-independent part of the
@@ -170,21 +172,21 @@ class GpRegressor(object):
         argument is not specified the errors are taken to be small but non-zero.
 
     :param hyperpars: \
-        An array specifying the hyperparameter values to be used by the
+        An array specifying the hyper-parameter values to be used by the
         covariance function class, which by default is SquaredExponential.
         See the documentation for the relevant covariance function class for
-        a description of the required hyperparameters. Generally this argument
-        should be left unspecified, in which case the hyperparameters will be
+        a description of the required hyper-parameters. Generally this argument
+        should be left unspecified, in which case the hyper-parameters will be
         selected automatically.
 
     :param class kernel: \
         The covariance function class which will be used to model the data. The
         covariance function classes can be imported from the gp_tools module and
-        then passed to GpRegressor using this keyword argument.
+        then passed to ``GpRegressor`` using this keyword argument.
 
     :param bool cross_val: \
-        If set to True, leave-one-out cross-validation is used to select the
-        hyperparameters in place of marginal likelihood.
+        If set to `True`, leave-one-out cross-validation is used to select the
+        hyper-parameters in place of the marginal likelihood.
     """
     def __init__(self, x, y, y_err = None, hyperpars = None, kernel = SquaredExponential, cross_val = False):
 
