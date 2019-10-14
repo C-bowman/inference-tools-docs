@@ -16,7 +16,7 @@ from itertools import product
 
 
 class SquaredExponential(object):
-    """
+    r"""
     SquaredExponential is a covariance-function class which can be passed to
     GpRegressor via the 'kernel' keyword argument. It uses the 'squared-exponential'
     covariance function given by:
@@ -92,9 +92,9 @@ class RationalQuadratic(object):
     For a problem with N spatial dimensions, SquaredExponential has N+2 hyper-parameters.
     For some array of hyper-parameters 'h':
 
-        - h[0] is the natural log of the standard deviation parameter.
-        - h[1] is the natural log of the exponent parameter.
-        - h[2:] are the natural log of the scale-lengths for each of the N spatial dimensions.
+    h[0] is the natural log of the standard deviation parameter.
+    h[1] is the natural log of the exponent parameter.
+    h[2:] are the natural log of the scale-lengths for each of the N spatial dimensions.
     """
     def __init__(self, x, y):
         # pre-calculates hyperparameter-independent part of the
