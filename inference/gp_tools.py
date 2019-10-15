@@ -182,7 +182,8 @@ class GpRegressor(object):
     :param class kernel: \
         The covariance function class which will be used to model the data. The
         covariance function classes can be imported from the gp_tools module and
-        then passed to ``GpRegressor`` using this keyword argument.
+        then passed to ``GpRegressor`` using this keyword argument. If left
+        unspecified, the ``SquaredExponential`` covariance function is used.
 
     :param bool cross_val: \
         If set to `True`, leave-one-out cross-validation is used to select the
@@ -240,7 +241,7 @@ class GpRegressor(object):
         :param list points: \
             A list containing the spatial locations where the mean and standard deviation
             of the estimate is to be calculated. In the 1D case this would be a list of
-            floats, or a list of coordinate tuples in the multi-dimensional case.
+            floats, or a list of coordinate arrays in the multi-dimensional case.
 
         :return: \
             Two 1D arrays, the first containing the means and the second containing the
@@ -298,7 +299,7 @@ class GpRegressor(object):
         :param list points: \
             A list containing the spatial locations where the mean vector and and covariance
             matrix of the gradient of the regression estimate are to be calculated. In the 1D
-            case this would be a list of floats, or a list of coordinate tuples in the
+            case this would be a list of floats, or a list of coordinate arrays in the
             multi-dimensional case.
 
         :return means, covariances: \
@@ -627,8 +628,8 @@ class GpOptimiser(object):
         argument is not specified the errors are taken to be small but non-zero.
 
     :keyword bounds: \
-        A iterable containing tuples which specify the upper and lower bounds
-        for the optimisation in each dimension in the format (lower_bound, upper_bound).
+        A list of tuples which specify the upper and lower bounds for each parameter
+        in the format `[(l1,u1), (l2,u2), ... ]`.
 
     :param hyperpars: \
         An array specifying the hyper-parameter values to be used by the
@@ -709,8 +710,8 @@ class GpOptimiser(object):
 
     def search_for_maximum(self):
         """
-        Request a proposed location for the next evaluation. This proposal is \
-        selected in order to maximise the "expected improvement" criteria which \
+        Request a proposed location for the next evaluation. This proposal is
+        selected in order to maximise the "expected improvement" criteria which
         searches for the global maximum value of the function.
 
         :return: location of the next proposed evaluation.
