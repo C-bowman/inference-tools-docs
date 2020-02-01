@@ -35,8 +35,19 @@ class SquaredExponential(object):
     .. math::
 
        \underline{\theta} = [ \ln{A}, \ln{l_1}, \ldots, \ln{l_n}]
+
+    :param hyperpar_bounds: \
+        By default, ``SquaredExponential`` will automatically set sensible lower and upper bounds on the value of
+        the hyperparameters based on the available data. However, this keyword allows the bounds to be specified
+        manually as a list of length-2 tuples giving the lower/upper bounds for each parameter.
     """
-    def __init__(self, x, y):
+    def __init__(self, hyperpar_bounds = None):
+        if hyperpar_bounds is None:
+            self.bounds = None
+        else:
+            self.bounds = hyperpar_bounds
+
+    def pass_data(self, x, y):
         # pre-calculates hyperparameter-independent part of the
         # data covariance matrix as an optimisation
         dx = x[:,None,:] - x[None,:,:]
@@ -44,12 +55,13 @@ class SquaredExponential(object):
         self.epsilon = 1e-12 * eye(dx.shape[0])  # small values added to the diagonal for stability
 
         # construct sensible bounds on the hyperparameter values
-        s = log(y.std())
-        self.bounds = [(s-4,s+4)]
-        for i in range(x.shape[1]):
-            lwr = log(abs(dx[:,:,i]).mean())-4
-            upr = log(dx[:,:,i].max())+2
-            self.bounds.append((lwr,upr))
+        if self.bounds is None:
+            s = log(y.std())
+            self.bounds = [(s-4,s+4)]
+            for i in range(x.shape[1]):
+                lwr = log(abs(dx[:,:,i]).mean())-4
+                upr = log(dx[:,:,i].max())+2
+                self.bounds.append((lwr,upr))
 
     def __call__(self, u, v, theta):
         a = exp(theta[0])
@@ -113,8 +125,19 @@ class RationalQuadratic(object):
     .. math::
 
        \underline{\theta} = [ \ln{A}, \ln{\alpha}, \ln{l_1}, \ldots, \ln{l_n}]
+
+    :param hyperpar_bounds: \
+        By default, ``RationalQuadratic`` will automatically set sensible lower and upper bounds on the value of
+        the hyperparameters based on the available data. However, this keyword allows the bounds to be specified
+        manually as a list of length-2 tuples giving the lower/upper bounds for each parameter.
     """
-    def __init__(self, x, y):
+    def __init__(self, hyperpar_bounds = None):
+        if hyperpar_bounds is None:
+            self.bounds = None
+        else:
+            self.bounds = hyperpar_bounds
+
+    def pass_data(self, x, y):
         # pre-calculates hyperparameter-independent part of the
         # data covariance matrix as an optimisation
         dx = x[:,None,:] - x[None,:,:]
@@ -122,12 +145,13 @@ class RationalQuadratic(object):
         self.epsilon = 1e-12 * eye(dx.shape[0])  # small values added to the diagonal for stability
 
         # construct sensible bounds on the hyperparameter values
-        s = log(y.std())
-        self.bounds = [(s-4,s+4), (-2,6)]
-        for i in range(x.shape[1]):
-            lwr = log(abs(dx[:,:,i]).mean())-4
-            upr = log(dx[:,:,i].max())+2
-            self.bounds.append((lwr,upr))
+        if self.bounds is None:
+            s = log(y.std())
+            self.bounds = [(s-4,s+4), (-2,6)]
+            for i in range(x.shape[1]):
+                lwr = log(abs(dx[:,:,i]).mean())-4
+                upr = log(dx[:,:,i].max())+2
+                self.bounds.append((lwr,upr))
 
     def __call__(self, u, v, theta):
         a = exp(theta[0])
@@ -213,10 +237,6 @@ class GpRegressor(object):
         should be left unspecified, in which case the hyper-parameters will be
         selected automatically.
 
-    :param hyperpar_bounds: \
-        A iterable containing tuples which specify lower and upper bounds on the
-        allowed values of each hyperparameter in the format (lower_bound, upper_bound).
-
     :param class kernel: \
         The covariance function class which will be used to model the data. The
         covariance function classes can be imported from the ``gp_tools`` module and
@@ -226,7 +246,7 @@ class GpRegressor(object):
         If set to ``True``, leave-one-out cross-validation is used to select the
         hyper-parameters in place of the marginal likelihood.
     """
-    def __init__(self, x, y, y_err = None, hyperpars = None, hyperpar_bounds = None, kernel = SquaredExponential, cross_val = False):
+    def __init__(self, x, y, y_err = None, hyperpars = None, kernel = SquaredExponential, cross_val = False):
 
         self.N_points = len(x)
         # identify the number of spatial dimensions
@@ -251,8 +271,14 @@ class GpRegressor(object):
             else:
                 raise ValueError('y_err must be the same length as y')
 
-        # create an instance of the covariance function class
-        self.cov = kernel(self.x, self.y)
+        # create an instance of the covariance function if only the class was passed
+        if isclass(kernel):
+            self.cov = kernel()
+        else:
+            self.cov = kernel
+
+        # pass the data to the kernel for pre-calculations
+        self.cov.pass_data(self.x, self.y)
 
         if cross_val:
             self.model_selector = self.loo_likelihood
@@ -261,10 +287,7 @@ class GpRegressor(object):
             self.model_selector = self.marginal_likelihood
             self.model_selector_gradient = self.marginal_likelihood_gradient
 
-        if hyperpar_bounds is None:
-            self.hp_bounds = self.cov.get_bounds()
-        else:
-            self.hp_bounds = hyperpar_bounds
+        self.hp_bounds = self.cov.get_bounds()
 
         # if hyper-parameters are specified manually, allocate them
         if hyperpars is None:
@@ -788,9 +811,12 @@ class ExpectedImprovement(object):
     """
     def __init__(self):
         self.ir2pi = 1 / sqrt(2*pi)
-        self.ir2 = 1. / sqrt(2.)
+        self.ir2 = 1. / sqrt(2)
         self.rpi2 = sqrt(0.5*pi)
         self.ln2pi = log(2*pi)
+
+        self.name = 'Expected improvement'
+        self.convergence_description = '$\mathrm{EI}_{\mathrm{max}} \; / \; (y_{\mathrm{max}} - y_{\mathrm{min}})$'
 
     def update_gp(self, gp):
         self.gp = gp
@@ -799,9 +825,14 @@ class ExpectedImprovement(object):
     def __call__(self, x):
         mu, sig = self.gp(x)
         Z = (mu[0] - self.mu_max) / sig[0]
-        pdf = self.normal_pdf(Z)
-        cdf = self.normal_cdf(Z)
-        return sig[0] * (Z*cdf + pdf)
+        if Z < -3:
+            ln_EI = log(1+Z*self.cdf_pdf_ratio(Z)) + self.ln_pdf(Z) + log(sig[0])
+            EI = exp(ln_EI)
+        else:
+            pdf = self.normal_pdf(Z)
+            cdf = self.normal_cdf(Z)
+            EI = sig[0] * (Z*cdf + pdf)
+        return EI
 
     def opt_func(self, x):
         mu, sig = self.gp(x)
@@ -866,8 +897,8 @@ class ExpectedImprovement(object):
             starts.append(x0)
         return starts
 
-    def get_name(self):
-        return 'Expected improvement'
+    def convergence_metric(self, x):
+        return self.__call__(x) / (self.mu_max - self.gp.y.min())
 
 
 
@@ -893,9 +924,12 @@ class UpperConfidenceBound(object):
     """
     def __init__(self, kappa = 2):
         self.kappa = kappa
+        self.name = 'Upper confidence bound'
+        self.convergence_description = '$\mathrm{UCB}_{\mathrm{max}} - y_{\mathrm{max}}$'
 
     def update_gp(self, gp):
         self.gp = gp
+        self.mu_max = gp.y.max()
 
     def __call__(self, x):
         mu, sig = self.gp(x)
@@ -916,8 +950,8 @@ class UpperConfidenceBound(object):
         starts = [v for v in self.gp.x]
         return starts
 
-    def get_name(self):
-        return 'Upper confidence bound'
+    def convergence_metric(self, x):
+        return self.__call__(x) - self.mu_max
 
 
 
@@ -1049,6 +1083,7 @@ class GpOptimiser(object):
 
         # create storage for tracking
         self.acquisition_max_history = []
+        self.convergence_metric_history = []
         self.iteration_history = []
 
     def __call__(self, x):
@@ -1064,7 +1099,8 @@ class GpOptimiser(object):
         :param new_y_err: Error of the new evaluation.
         """
         # store the acquisition function value of the new point
-        self.acquisition_max_history.append(-self.acquisition(new_x) )
+        self.acquisition_max_history.append( self.acquisition(new_x) )
+        self.convergence_metric_history.append( self.acquisition.convergence_metric(new_x) )
         self.iteration_history.append( len(self.y)+1 )
 
         # update the data arrays
@@ -1137,12 +1173,13 @@ class GpOptimiser(object):
         ax1.grid()
 
         ax2 = fig.add_subplot(122)
-        ax2.plot(self.iteration_history, self.acquisition_max_history, c = 'C0', alpha = 0.35)
-        ax2.plot(self.iteration_history, self.acquisition_max_history, '.', c = 'C0', label = self.acquisition.get_name(), markersize = 10)
+        ax2.plot(self.iteration_history, self.convergence_metric_history, c = 'C0', alpha = 0.35)
+        ax2.plot(self.iteration_history, self.convergence_metric_history, '.', c = 'C0', label = self.acquisition.convergence_description, markersize = 10)
         ax2.set_yscale('log')
         ax2.set_xlabel('iteration')
         ax2.set_ylabel('acquisition function value')
         ax2.set_xlim([0,None])
+        ax2.set_title('Convergence summary')
         ax2.legend()
         ax2.grid()
 
