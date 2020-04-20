@@ -62,6 +62,7 @@ class SquaredExponential(object):
                 lwr = log(abs(dx[:,:,i]).mean())-4
                 upr = log(dx[:,:,i].max())+2
                 self.bounds.append((lwr,upr))
+        self.n_params = len(self.bounds)
 
     def __call__(self, u, v, theta):
         a = exp(theta[0])
@@ -96,9 +97,9 @@ class SquaredExponential(object):
         L = exp(theta[1:])
         C = exp((self.distances / L[None,None,:]**2).sum(axis=2)) + self.epsilon
         K = (a**2)*C
-        grads = [(2.*a)*C]
+        grads = [2.*K]
         for i,k in enumerate(L):
-            grads.append( (-2./k**3)*self.distances[:,:,i]*K )
+            grads.append( (-2./k**2)*self.distances[:,:,i]*K )
         return K, grads
 
     def get_bounds(self):
@@ -190,15 +191,64 @@ class RationalQuadratic(object):
         C = exp(-q*ln_F) + self.epsilon
 
         K = (a**2)*C
-        grads = [(2.*a)*C]
-        grads.append( -K*(ln_F - (Z/q)/F) )
+        grads = [2.*K, -K*(ln_F*q - Z/F)]
         G = 2*K/F
         for i,l in enumerate(L):
-            grads.append( G*(self.distances[:,:,i]/l**3) )
+            grads.append( G*(self.distances[:,:,i]/l**2) )
         return K, grads
 
     def get_bounds(self):
         return self.bounds
+
+
+
+
+
+
+class ConstantMean(object):
+    def __init__(self):
+        self.n_params = 1
+
+    def pass_data(self, x, y):
+        self.n_data = len(y)
+        w = y.max() - y.min()
+        self.bounds = [(y.min()-w, y.max()+w)]
+
+    def __call__(self, q, theta):
+        return theta[0]
+
+    def build_mean(self, theta):
+        return zeros(self.n_data) + theta[0]
+
+    def mean_and_gradients(self, theta):
+        return zeros(self.n_data) + theta[0], [ones(self.n_data)]
+
+
+
+
+
+
+class LinearMean(object):
+    def __init__(self):
+        pass
+
+    def pass_data(self, x, y):
+        self.x = x
+        self.n_data = len(y)
+        self.n_params = 1 + self.x.shape[1]
+        w = y.max() - y.min()
+        self.bounds = [(y.min()-w, y.max()+w)]
+
+    def __call__(self, q, theta):
+        return theta[0] + theta[1:]*q
+
+    def build_mean(self, theta):
+        return theta[0] + dot(theta[1:], self.x)
+
+    def mean_and_gradients(self, theta):
+        grads = [ones(self.n_data)]
+        grads.extend( [v for v in self.x.T] )
+        return theta[0] + dot(theta[1:], self.x), grads
 
 
 
@@ -217,9 +267,9 @@ class GpRegressor(object):
     normal distribution.
 
     :param x: \
-        The spatial coordinates of the y-data values. For the 1-dimensional case,
-        this should be a list or array of floats. For greater than 1 dimension,
-        a list of coordinate arrays or tuples should be given.
+        The x-data points as a 2D ``numpy.ndarray`` with shape (number of points,
+        number of dimensions). Alternatively, a list of array-like objects can be
+        given, which will be converted to a ``ndarray`` internally.
 
     :param y: The y-data values as a list or array of floats.
 
@@ -246,23 +296,24 @@ class GpRegressor(object):
         If set to ``True``, leave-one-out cross-validation is used to select the
         hyper-parameters in place of the marginal likelihood.
     """
-    def __init__(self, x, y, y_err = None, hyperpars = None, kernel = SquaredExponential, cross_val = False):
+    def __init__(self, x, y, y_err = None, hyperpars = None, kernel = SquaredExponential, mean = ConstantMean, cross_val = False):
 
-        self.N_points = len(x)
-        # identify the number of spatial dimensions
-        if hasattr(x[0], '__len__'):  # multi-dimensional case
-            self.N_dimensions = len(x[0])
-        else:  # 1D case
+        # store the data
+        self.x = array(x)
+        self.y = array(y).squeeze()
+
+        # determine the number of data points and spatial dimensions
+        self.N_points = self.y.shape[0]
+        if len(self.x.shape) == 1:
             self.N_dimensions = 1
+            self.x = self.x.reshape([self.x.shape[0], self.N_dimensions])
+        else:
+            self.N_dimensions = self.x.shape[1]
 
-        # load the spatial data into a 2D array
-        self.x = zeros([self.N_points,self.N_dimensions])
-        for i,v in enumerate(x): self.x[i,:] = v
+        if self.x.shape[0] != self.N_points:
+            raise ValueError('The given number of x-data points does not match the number of y-data values')
 
-        # data to fit
-        self.y = array(y)
-
-        # data errors covariance matrix
+        # build data errors covariance matrix
         self.sig = zeros([self.N_points, self.N_points])
         if y_err is not None:
             if len(y) == len(y_err):
@@ -277,17 +328,29 @@ class GpRegressor(object):
         else:
             self.cov = kernel
 
-        # pass the data to the kernel for pre-calculations
+        # create an instance of the mean function if only the class was passed
+        if isclass(mean):
+            self.mean = mean()
+        else:
+            self.mean = mean
+
+        # pass the data to the mean and covariance functions for pre-calculations
         self.cov.pass_data(self.x, self.y)
+        self.mean.pass_data(self.x, self.y)
+        # collect the bounds on all the hyper-parameters
+        self.hp_bounds = copy(self.mean.bounds)
+        self.hp_bounds.extend( copy(self.cov.bounds) )
+        # build slices to address the different parameter sets
+        self.n_hyperpars = len(self.hp_bounds)
+        self.mean_slice = slice(0, self.mean.n_params)
+        self.cov_slice = slice(self.mean.n_params, self.n_hyperpars)
 
         if cross_val:
             self.model_selector = self.loo_likelihood
-            self.model_selector_gradient = self. loo_likelihood_gradient
+            self.model_selector_gradient = self.loo_likelihood_gradient
         else:
             self.model_selector = self.marginal_likelihood
             self.model_selector_gradient = self.marginal_likelihood_gradient
-
-        self.hp_bounds = self.cov.get_bounds()
 
         # if hyper-parameters are specified manually, allocate them
         if hyperpars is None:
@@ -301,10 +364,11 @@ class GpRegressor(object):
         Calculate the mean and standard deviation of the regression estimate at a series
         of specified spatial points.
 
-        :param list points: \
-            A list containing the spatial locations where the mean and standard deviation
-            of the estimate is to be calculated. In the 1D case this would be a list of
-            floats, or a list of coordinate tuples in the multi-dimensional case.
+        :param points: \
+            The points at which the mean and standard deviation of the regression estimate is to be
+            calculated, given as a 2D ``numpy.ndarray`` with shape (number of points, number of dimensions).
+            Alternatively, a list of array-like objects can be given, which will be converted
+            to a ``ndarray`` internally.
 
         :return: \
             Two 1D arrays, the first containing the means and the second containing the
@@ -318,9 +382,9 @@ class GpRegressor(object):
         p = self.process_points(points)
 
         for q in p[:,None,:]:
-            K_qx = self.cov(q, self.x, self.hyperpars)
-            K_qq = self.cov(q, q, self.hyperpars)
-            mu_q.append(dot(K_qx, self.alpha)[0])
+            K_qx = self.cov(q, self.x, self.cov_hyperpars)
+            K_qq = self.cov(q, q, self.cov_hyperpars)
+            mu_q.append(dot(K_qx, self.alpha)[0] + self.mean(q,self.mean_hyperpars))
             v = solve_triangular(self.L, K_qx.T, lower = True)
             errs.append( K_qq[0,0] - npsum(v**2) )
 
@@ -328,9 +392,12 @@ class GpRegressor(object):
 
     def set_hyperparameters(self, theta):
         self.hyperpars = theta
-        self.K_xx = self.cov.build_covariance(theta) + self.sig
+        self.mean_hyperpars = self.hyperpars[self.mean_slice]
+        self.cov_hyperpars = self.hyperpars[self.cov_slice]
+        self.K_xx = self.cov.build_covariance(self.cov_hyperpars) + self.sig
+        self.mu = self.mean.build_mean(self.mean_hyperpars)
         self.L = cholesky(self.K_xx)
-        self.alpha = solve_triangular(self.L.T, solve_triangular(self.L, self.y, lower = True))
+        self.alpha = solve_triangular(self.L.T, solve_triangular(self.L, self.y-self.mu, lower = True))
 
     def process_points(self, points):
         if type(points) is ndarray:
@@ -360,11 +427,11 @@ class GpRegressor(object):
         Calculate the mean and covariance of the gradient of the regression estimate
         with respect to the spatial coordinates at a series of specified points.
 
-        :param list points: \
-            A list containing the spatial locations where the mean vector and and covariance
-            matrix of the gradient of the regression estimate are to be calculated. In the 1D
-            case this would be a list of floats, or a list of coordinate tuples in the
-            multi-dimensional case.
+        :param points: \
+            The points at which the mean vector and and covariance matrix of the gradient of the
+            regression estimate are to be calculated, given as a 2D ``numpy.ndarray`` with shape
+            (number of points, number of dimensions).  Alternatively, a list of array-like objects
+            can be given, which will be converted to a ``ndarray`` internally.
 
         :return means, covariances: \
             Two arrays containing the means and covariances of each given spatial point. If the
@@ -376,8 +443,8 @@ class GpRegressor(object):
         vars = []
         p = self.process_points(points)
         for q in p[:,None,:]:
-            K_qx = self.cov(q, self.x, self.hyperpars)
-            A, R = self.cov.gradient_terms(q[0,:], self.x, self.hyperpars)
+            K_qx = self.cov(q, self.x, self.cov_hyperpars)
+            A, R = self.cov.gradient_terms(q[0,:], self.x, self.cov_hyperpars)
 
             B = (K_qx * self.alpha).T
             Q = solve_triangular(self.L, (A*K_qx).T, lower = True)
@@ -398,10 +465,11 @@ class GpRegressor(object):
         calculation of the spatial derivatives of acquisition functions like the expected
         improvement.
 
-        :param list points: \
-            A list containing the spatial locations where the gradient of the mean and
-            variance are to be calculated. In the 1D case this would be a list of floats,
-            or a list of coordinate tuples in the multi-dimensional case.
+        :param points: \
+            The points at which gradient of the predictive mean and variance are to be calculated,
+            given as a 2D ``numpy.ndarray`` with shape (number of points, number of dimensions).
+            Alternatively, a list of array-like objects can be given, which will be converted to a
+            ``ndarray`` internally.
 
         :return mean_gradients, variance_gradients: \
             Two arrays containing the gradient vectors of the mean and variance at each given
@@ -411,8 +479,8 @@ class GpRegressor(object):
         var_gradients = []
         p = self.process_points(points)
         for q in p[:,None,:]:
-            K_qx = self.cov(q, self.x, self.hyperpars)
-            A, _ = self.cov.gradient_terms(q[0,:], self.x, self.hyperpars)
+            K_qx = self.cov(q, self.x, self.cov_hyperpars)
+            A, _ = self.cov.gradient_terms(q[0,:], self.x, self.cov_hyperpars)
             B = (K_qx * self.alpha).T
             Q = solve_triangular(self.L.T, solve_triangular(self.L, K_qx.T, lower = True))
 
@@ -427,20 +495,21 @@ class GpRegressor(object):
 
     def build_posterior(self, points):
         """
-        Generates the full mean vector and covariance matrix for the GP fit at
-        a set of specified points.
+        Generates the full mean vector and covariance matrix for the Gaussian-process
+        posterior distribution at a set of specified points.
 
         :param points: \
-            A list containing the spatial locations which will be used to construct
-            the Gaussian process. In the 1D case this would be a list of floats, or
-            a list of coordinate tuples in the multi-dimensional case.
+            The points for which the mean vector and covariance matrix are to be calculated,
+            given as a 2D ``numpy.ndarray`` with shape (number of points, number of dimensions).
+            Alternatively, a list of array-like objects can be given, which will be converted to a
+            ``ndarray`` internally.
 
-        :return: The mean vector as a 1D array, followed by covariance matrix as a 2D array.
+        :return: The mean vector as a 1D array, followed by the covariance matrix as a 2D array.
         """
         v = self.process_points(points)
-        K_qx = self.cov(v, self.x, self.hyperpars)
-        K_qq = self.cov(v, v, self.hyperpars)
-        mu = dot(K_qx, self.alpha)
+        K_qx = self.cov(v, self.x, self.cov_hyperpars)
+        K_qq = self.cov(v, v, self.cov_hyperpars)
+        mu = dot(K_qx, self.alpha) + array([self.mean(p,self.mean_hyperpars) for p in v])
         sigma = K_qq - dot(K_qx, solve_triangular(self.L.T, solve_triangular(self.L, K_qx.T, lower = True)))
         return mu, sigma
 
@@ -470,13 +539,14 @@ class GpRegressor(object):
         Rasmussen & Williams.
         """
         try:
-            K_xx = self.cov.build_covariance(theta) + self.sig
+            K_xx = self.cov.build_covariance(theta[self.cov_slice]) + self.sig
+            mu = self.mean.build_mean(theta[self.mean_slice])
             L = cholesky(K_xx)
 
             # Use the Cholesky decomposition of the covariance to find its inverse
             I = eye(len(self.x))
             iK = solve_triangular(L.T, solve_triangular(L, I, lower = True))
-            alpha = solve_triangular(L.T, solve_triangular(L, self.y, lower = True))
+            alpha = solve_triangular(L.T, solve_triangular(L, self.y-mu, lower = True))
             var = 1. / diag(iK)
             return -0.5*(var*alpha**2 + log(var)).sum()
         except:
@@ -491,23 +561,35 @@ class GpRegressor(object):
         This implementation is based on equations (5.10, 5.11, 5.12, 5.13, 5.14)
         from Rasmussen & Williams.
         """
-        K_xx, grad_K = self.cov.covariance_and_gradients(theta)
+        K_xx, grad_K = self.cov.covariance_and_gradients(theta[self.cov_slice])
         K_xx += self.sig
+        mu, grad_mu = self.mean.mean_and_gradients(theta[self.mean_slice])
         L = cholesky(K_xx)
 
         # Use the Cholesky decomposition of the covariance to find its inverse
         I = eye(len(self.x))
         iK = solve_triangular(L.T, solve_triangular(L, I, lower = True))
-        alpha = solve_triangular(L.T, solve_triangular(L, self.y, lower = True))
+        alpha = solve_triangular(L.T, solve_triangular(L, self.y-mu, lower = True))
         var = 1. / diag(iK)
         LOO = -0.5*(var*alpha**2 + log(var)).sum()
 
-        grad = zeros(len(grad_K))
-        for i,dK in enumerate(grad_K):
+        cov_gradients = []
+        for dK in grad_K:
             Z = iK.dot(dK)
-            grad[i] = ((alpha*Z.dot(alpha) - 0.5*(1 + var*alpha**2)*diag(Z.dot(iK))) * var).sum()
+            g = ((alpha*Z.dot(alpha) - 0.5*(1 + var*alpha**2)*diag(Z.dot(iK))) * var).sum()
+            cov_gradients.append(g)
 
-        return LOO, grad*exp(theta)
+        mean_gradients = []
+        for dmu in grad_mu:
+            Z = iK.dot(dmu)
+            g = (alpha*var*Z).sum()
+            mean_gradients.append(g)
+
+        grad = zeros(self.n_hyperpars)
+        grad[self.cov_slice] = array(cov_gradients)
+        grad[self.mean_slice] = array(mean_gradients)
+
+        return LOO, grad
 
     def marginal_likelihood(self, theta):
         """
@@ -515,12 +597,12 @@ class GpRegressor(object):
 
         This implementation is based on equation (5.8) from Rasmussen & Williams.
         """
-        K_xx = self.cov.build_covariance(theta) + self.sig
-
+        K_xx = self.cov.build_covariance(theta[self.cov_slice]) + self.sig
+        mu = self.mean.build_mean(theta[self.mean_slice])
         try: # protection against singular matrix error crash
             L = cholesky(K_xx)
-            alpha = solve_triangular(L.T, solve_triangular(L, self.y, lower = True))
-            return -0.5*dot( self.y.T, alpha ) - log(diagonal(L)).sum()
+            alpha = solve_triangular(L.T, solve_triangular(L, self.y-mu, lower = True))
+            return -0.5*dot( (self.y-mu).T, alpha ) - log(diagonal(L)).sum()
         except:
             warn('Cholesky decomposition failure in marginal_likelihood')
             return -1e50
@@ -532,18 +614,21 @@ class GpRegressor(object):
 
         This implementation is based on equations (5.8, 5.9) from Rasmussen & Williams.
         """
-        K_xx, grad_K = self.cov.covariance_and_gradients(theta)
+        K_xx, grad_K = self.cov.covariance_and_gradients(theta[self.cov_slice])
         K_xx += self.sig
-
+        mu, grad_mu = self.mean.mean_and_gradients(theta[self.mean_slice])
         # get the cholesky decomposition
         L = cholesky(K_xx)
         # calculate the log-marginal likelihood
-        alpha = solve_triangular(L.T, solve_triangular(L, self.y, lower = True))
-        LML = -0.5*dot( self.y.T, alpha ) - log(diagonal(L)).sum()
-        # calculate the gradients
+        alpha = solve_triangular(L.T, solve_triangular(L, self.y-mu, lower = True))
+        LML = -0.5*dot( (self.y-mu).T, alpha ) - log(diagonal(L)).sum()
+        # calculate the mean parameter gradients
+        grad = zeros(self.n_hyperpars)
+        grad[self.mean_slice] = array([(alpha * dmu).sum() for dmu in grad_mu])
+        # calculate the covariance parameter gradients
         iK = solve_triangular(L.T, solve_triangular(L, eye(L.shape[0]), lower = True))
         Q = alpha[:,None]*alpha[None,:] - iK
-        grad = array([ 0.5*(Q*dK.T).sum() for dK in grad_K])*exp(theta)
+        grad[self.cov_slice] = array([0.5 * (Q * dK.T).sum() for dK in grad_K])
         return LML, grad
 
     def optimize_hyperparameters(self):
