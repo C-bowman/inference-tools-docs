@@ -4,13 +4,14 @@
 """
 
 from numpy import abs, exp, log, dot, sqrt, argmin, diagonal, ndarray, arange
-from numpy import zeros, ones, array, where, pi, diag, eye, maximum
+from numpy import zeros, ones, array, where, pi, diag, eye, maximum, minimum
 from numpy import sum as npsum
 from numpy.random import random
 from scipy.special import erf, erfcx
 from numpy.linalg import inv, slogdet, solve, cholesky
 from scipy.linalg import solve_triangular
 from scipy.optimize import minimize, differential_evolution, fmin_l_bfgs_b
+from multiprocessing import Pool
 from itertools import product
 from warnings import warn
 from copy import copy
@@ -233,22 +234,25 @@ class LinearMean(object):
         pass
 
     def pass_data(self, x, y):
-        self.x = x
+        self.x_mean = x.mean(axis=0)
+        self.dx = x - self.x_mean[None,:]
         self.n_data = len(y)
-        self.n_params = 1 + self.x.shape[1]
+        self.n_params = 1 + x.shape[1]
         w = y.max() - y.min()
-        self.bounds = [(y.min()-w, y.max()+w)]
+        grad_bounds = 10*w / (x.max(axis=0) - x.min(axis=0))
+        self.bounds = [(y.min()-2*w, y.max()+2*w)]
+        self.bounds.extend( [(-b,b) for b in grad_bounds] )
 
     def __call__(self, q, theta):
-        return theta[0] + theta[1:]*q
+        return theta[0] + dot(q-self.x_mean, theta[1:]).squeeze()
 
     def build_mean(self, theta):
-        return theta[0] + dot(theta[1:], self.x)
+        return theta[0] + dot(self.dx, theta[1:])
 
     def mean_and_gradients(self, theta):
         grads = [ones(self.n_data)]
-        grads.extend( [v for v in self.x.T] )
-        return theta[0] + dot(theta[1:], self.x), grads
+        grads.extend( [v for v in self.dx.T] )
+        return theta[0] + dot(self.dx, theta[1:]), grads
 
 
 
@@ -295,8 +299,18 @@ class GpRegressor(object):
     :param bool cross_val: \
         If set to ``True``, leave-one-out cross-validation is used to select the
         hyper-parameters in place of the marginal likelihood.
+
+    :param str optimizer: \
+        Selects the method used to optimize the hyper-parameter values. The available
+        options are "bfgs" for ``scipy.optimize.fmin_l_bfgs_b`` or "diffev" for
+        ``scipy.optimize.differential_evolution``.
+
+    :param int n_processes: \
+        Sets the number of processes used in optimizing the hyper-parameter values.
+        Multiple processes are only used when the optimizer keyword is set to "bfgs".
     """
-    def __init__(self, x, y, y_err = None, hyperpars = None, kernel = SquaredExponential, mean = ConstantMean, cross_val = False):
+    def __init__(self, x, y, y_err = None, hyperpars = None, kernel = SquaredExponential, mean = ConstantMean,
+                 cross_val = False, optimizer = 'bfgs', n_processes = 1):
 
         # store the data
         self.x = array(x)
@@ -352,14 +366,25 @@ class GpRegressor(object):
             self.model_selector = self.marginal_likelihood
             self.model_selector_gradient = self.marginal_likelihood_gradient
 
-        # if hyper-parameters are specified manually, allocate them
+        # if hyper-parameters are not specified, run an optimizer to select them
         if hyperpars is None:
-            hyperpars = self.optimize_hyperparameters()
+            if optimizer not in ['bfgs', 'diffev']:
+                optimizer = 'bfgs'
+                warn("""
+                     An invalid option was passed to the 'optimizer' keyword argument.
+                     The default option 'bfgs' was used instead.
+                     Valid options are 'bfgs' and 'diffev'.
+                     """)
+
+            if optimizer == 'diffev':
+                hyperpars = self.differential_evo()
+            else:
+                hyperpars = self.multistart_bfgs(n_processes=n_processes)
 
         # build the covariance matrix
         self.set_hyperparameters(hyperpars)
 
-    def __call__(self, points, theta = None):
+    def __call__(self, points):
         """
         Calculate the mean and standard deviation of the regression estimate at a series
         of specified spatial points.
@@ -374,8 +399,6 @@ class GpRegressor(object):
             Two 1D arrays, the first containing the means and the second containing the
             standard deviations.
         """
-        if theta is not None:
-            self.set_hyperparameters(theta)
 
         mu_q = []
         errs = []
@@ -384,14 +407,31 @@ class GpRegressor(object):
         for q in p[:,None,:]:
             K_qx = self.cov(q, self.x, self.cov_hyperpars)
             K_qq = self.cov(q, q, self.cov_hyperpars)
+
             mu_q.append(dot(K_qx, self.alpha)[0] + self.mean(q,self.mean_hyperpars))
             v = solve_triangular(self.L, K_qx.T, lower = True)
             errs.append( K_qq[0,0] - npsum(v**2) )
 
         return array(mu_q), sqrt( abs(array(errs)) )
 
-    def set_hyperparameters(self, theta):
-        self.hyperpars = theta
+    def set_hyperparameters(self, hyperpars):
+        """
+        Update the hyper-parameter values of the model.
+
+        :param hyperpars: \
+            An array containing the hyper-parameter values to be used.
+        """
+        # check to make sure the right number of hyper-parameters were given
+        if len(hyperpars) != self.n_hyperpars:
+            raise ValueError(
+                """
+                [ GpRegressor error ]
+                An incorrect number of hyper-parameters were passed via the 'hyperpars' keyword argument:
+                There are {} hyper-parameters but {} were given.
+                """.format(self.n_hyperpars, len(hyperpars))
+            )
+
+        self.hyperpars = hyperpars
         self.mean_hyperpars = self.hyperpars[self.mean_slice]
         self.cov_hyperpars = self.hyperpars[self.cov_slice]
         self.K_xx = self.cov.build_covariance(self.cov_hyperpars) + self.sig
@@ -631,24 +671,34 @@ class GpRegressor(object):
         grad[self.cov_slice] = array([0.5 * (Q * dK.T).sum() for dK in grad_K])
         return LML, grad
 
-    def optimize_hyperparameters(self):
+    def differential_evo(self):
         # optimise the hyperparameters
         opt_result = differential_evolution(lambda x : -self.model_selector(x), self.hp_bounds)
         return opt_result.x
 
-    def bfgs_func(self, theta):
+    def bfgs_cost_func(self, theta):
         y, grad_y = self.model_selector_gradient(theta)
         return -y, -grad_y
 
-    def multistart_bfgs(self, starts = None):
+    def launch_bfgs(self, x0):
+        return fmin_l_bfgs_b(self.bfgs_cost_func, x0, approx_grad = False, bounds = self.hp_bounds)
+
+    def multistart_bfgs(self, starts = None, n_processes = 1):
         if starts is None: starts = int(2*sqrt(len(self.hp_bounds)))+1
         # starting positions guesses by random sampling + one in the centre of the hypercube
         lwr, upr = [array([k[i] for k in self.hp_bounds]) for i in [0,1]]
         starting_positions = [ lwr + (upr-lwr)*random(size = len(self.hp_bounds)) for _ in range(starts-1) ]
         starting_positions.append(0.5*(lwr+upr))
+
         # run BFGS for each starting position
-        results = [ fmin_l_bfgs_b(self.bfgs_func, x0, approx_grad = False, bounds = self.hp_bounds) for x0 in starting_positions ]
+        if n_processes == 1:
+            results = [self.launch_bfgs(x0) for x0 in starting_positions]
+        else:
+            workers = Pool(n_processes)
+            results = workers.map(self.launch_bfgs, starting_positions)
+
         # extract best solution
+        # print(results[0])
         solution = sorted(results, key = lambda x : x[1])[0][0]
         return solution
 
@@ -901,7 +951,7 @@ class ExpectedImprovement(object):
         self.ln2pi = log(2*pi)
 
         self.name = 'Expected improvement'
-        self.convergence_description = '$\mathrm{EI}_{\mathrm{max}} \; / \; (y_{\mathrm{max}} - y_{\mathrm{min}})$'
+        self.convergence_description = r'$\mathrm{EI}_{\mathrm{max}} \; / \; (y_{\mathrm{max}} - y_{\mathrm{min}})$'
 
     def update_gp(self, gp):
         self.gp = gp
@@ -947,7 +997,14 @@ class ExpectedImprovement(object):
             ln_EI = log(EI)
             grad_ln_EI = (0.5*pdf*dvar/sig[0] + dmu*cdf) / EI
 
-        return -ln_EI, -grad_ln_EI.squeeze()
+        # flip sign on the value and gradient since we're using a minimizer
+        ln_EI = -ln_EI
+        grad_ln_EI = -grad_ln_EI
+        # make sure outputs are ndarray in the 1D case
+        if type(ln_EI) is not ndarray: ln_EI = array(ln_EI)
+        if type(grad_ln_EI) is not ndarray: grad_ln_EI = array(grad_ln_EI)
+
+        return ln_EI, grad_ln_EI.squeeze()
 
     def normal_pdf(self, z):
         return exp(-0.5*z**2)*self.ir2pi
@@ -962,24 +1019,19 @@ class ExpectedImprovement(object):
         return -0.5*(z**2 + self.ln2pi)
 
     def starting_positions(self, bounds):
-        lwr, upr = [array([k[i] for k in bounds]) for i in [0,1]]
+        lwr, upr = [array([k[i] for k in bounds], dtype=float) for i in [0,1]]
         widths = upr-lwr
-        starts = []
-        for x0 in self.gp.x:
-            # get the gradient at the current point
-            y0, g0 = self.opt_func_gradient(x0)
-            for i in range(20):
-                step = 2e-3 / (abs(g0) / widths).max()
 
-                x1 = x0-step*g0
-                y1, g1 = self.opt_func_gradient(x1)
-                if (y1 < y0) and ((x1 >= lwr)&(x1 <= upr)).all():
-                    x0 = x1.copy()
-                    g0 = g1.copy()
-                    y0 = copy(y1)
-                else:
-                    break
-            starts.append(x0)
+        lwr += widths*0.01
+        upr -= widths*0.01
+        starts = []
+        L = len(widths)
+        for x0 in self.gp.x:
+            samples = [ x0 + 0.02*widths*(2*random(size=L)-1) for i in range(20) ]
+            samples = [minimum(upr, maximum(lwr, s)) for s in samples]
+            samples = sorted(samples, key=self.opt_func)
+            starts.append(samples[0])
+
         return starts
 
     def convergence_metric(self, x):
@@ -1010,7 +1062,7 @@ class UpperConfidenceBound(object):
     def __init__(self, kappa = 2):
         self.kappa = kappa
         self.name = 'Upper confidence bound'
-        self.convergence_description = '$\mathrm{UCB}_{\mathrm{max}} - y_{\mathrm{max}}$'
+        self.convergence_description = r'$\mathrm{UCB}_{\mathrm{max}} - y_{\mathrm{max}}$'
 
     def update_gp(self, gp):
         self.gp = gp
@@ -1029,10 +1081,28 @@ class UpperConfidenceBound(object):
         dmu, dvar = self.gp.spatial_derivatives(x)
         ucb = mu[0] + self.kappa*sig[0]
         grad_ucb = dmu + 0.5*self.kappa*dvar/sig[0]
-        return -ucb, -grad_ucb.squeeze()
+        # flip sign on the value and gradient since we're using a minimizer
+        ucb = -ucb
+        grad_ucb = -grad_ucb
+        # make sure outputs are ndarray in the 1D case
+        if type(ucb) is not ndarray: ucb = array(ucb)
+        if type(grad_ucb) is not ndarray: grad_ucb = array(grad_ucb)
+        return ucb, grad_ucb.squeeze()
 
     def starting_positions(self, bounds):
-        starts = [v for v in self.gp.x]
+        lwr, upr = [array([k[i] for k in bounds], dtype=float) for i in [0,1]]
+        widths = upr-lwr
+
+        lwr += widths*0.01
+        upr -= widths*0.01
+        starts = []
+        L = len(widths)
+        for x0 in self.gp.x:
+            samples = [ x0 + 0.02*widths*(2*random(size=L)-1) for i in range(20) ]
+            samples = [minimum(upr, maximum(lwr, s)) for s in samples]
+            samples = sorted(samples, key=self.opt_func)
+            starts.append(samples[0])
+
         return starts
 
     def convergence_metric(self, x):
@@ -1056,7 +1126,8 @@ class MaxVariance(object):
     prediction of the function.
     """
     def __init__(self):
-        pass
+        self.name = 'Max variance'
+        self.convergence_description = r'$\sqrt{\mathrm{Var}\left[x\right]}$'
 
     def update_gp(self, gp):
         self.gp = gp
@@ -1073,17 +1144,19 @@ class MaxVariance(object):
     def opt_func_gradient(self, x):
         _, sig = self.gp(x)
         _, dvar = self.gp.spatial_derivatives(x)
-        return -sig[0]**2, -dvar.squeeze()
+        aq = -sig**2
+        aq_grad = -dvar
+        if type(aq) is not ndarray: aq = array(aq)
+        if type(aq_grad) is not ndarray: aq_grad = array(aq_grad)
+        return aq.squeeze(), aq_grad.squeeze()
 
     def starting_positions(self, bounds):
         lwr, upr = [array([k[i] for k in bounds]) for i in [0,1]]
         starts = [lwr + (upr - lwr)*random(size=len(bounds)) for _ in range(len(self.gp.y))]
         return starts
 
-    def get_name(self):
-        return 'Max variance'
-
-
+    def convergence_metric(self, x):
+        return sqrt(self.__call__(x))
 
 
 
@@ -1102,12 +1175,12 @@ class GpOptimiser(object):
     search for the global maximum, on initialisation GpOptimiser must be provided with
     at least two evaluations of the function which is to be maximised.
 
-    :param x: \
+    :param list x: \
         The spatial coordinates of the y-data values. For the 1-dimensional case,
         this should be a list or array of floats. For greater than 1 dimension,
         a list of coordinate arrays or tuples should be given.
 
-    :param y: The y-data values as a list or array of floats.
+    :param list y: The y-data values as a list or array of floats.
 
     :keyword y_err: \
         The error on the y-data values supplied as a list or array of floats.
@@ -1142,9 +1215,18 @@ class GpOptimiser(object):
         imported from the ``gp_tools`` module and then passed as arguments - see their
         documentation for the list of available acquisition functions. If left unspecified,
         the ``ExpectedImprovement`` acquisition function is used by default.
+
+    :param str optimizer: \
+        Selects the optimization method used for selecting hyper-parameter values proposed
+        evaluations. Available options are "bfgs" for ``scipy.optimize.fmin_l_bfgs_b`` or
+        "diffev" for ``scipy.optimize.differential_evolution``.
+
+    :param int n_processes: \
+        Sets the number of processes used when selecting hyper-parameters or proposed evaluations.
+        Multiple processes are only used when the optimizer keyword is set to "bfgs".
     """
     def __init__(self, x, y, y_err = None, bounds = None, hyperpars = None, kernel = SquaredExponential,
-                 cross_val = False, acquisition = ExpectedImprovement):
+                 cross_val = False, acquisition = ExpectedImprovement, optimizer = 'bfgs', n_processes = 1):
         self.x = list(x)
         self.y = list(y)
         self.y_err = y_err
@@ -1157,7 +1239,10 @@ class GpOptimiser(object):
 
         self.kernel = kernel
         self.cross_val = cross_val
-        self.gp = GpRegressor(x, y, y_err=y_err, hyperpars=hyperpars, kernel=kernel, cross_val=cross_val)
+        self.n_processes = n_processes
+        self.optimizer = optimizer
+        self.gp = GpRegressor(x, y, y_err=y_err, hyperpars=hyperpars, kernel=kernel, cross_val=cross_val,
+                              optimizer=self.optimizer, n_processes=self.n_processes)
 
         # if the class has been passed instead of an instance, create an instance
         if isclass(acquisition):
@@ -1198,7 +1283,8 @@ class GpOptimiser(object):
                 raise ValueError('y_err must be specified for new evaluations if y_err was specified during __init__')
 
         # re-train the GP
-        self.gp = GpRegressor(self.x, self.y, y_err=self.y_err, kernel = self.kernel, cross_val = self.cross_val)
+        self.gp = GpRegressor(self.x, self.y, y_err=self.y_err, kernel = self.kernel, cross_val = self.cross_val,
+                              optimizer=self.optimizer, n_processes=self.n_processes)
         self.mu_max = max(self.y)
 
         # update the acquisition function info
@@ -1211,16 +1297,24 @@ class GpOptimiser(object):
         if hasattr(funcval, '__len__'): funcval = funcval[0]
         return solution, funcval
 
+    def launch_bfgs(self, x0):
+        return fmin_l_bfgs_b(self.acquisition.opt_func_gradient, x0, approx_grad = False, bounds = self.bounds, pgtol=1e-10)
+
     def multistart_bfgs(self):
         starting_positions = self.acquisition.starting_positions(self.bounds)
         # run BFGS for each starting position
-        results = [ fmin_l_bfgs_b(self.acquisition.opt_func_gradient, x0, approx_grad = False, bounds = self.bounds, pgtol=1e-10) for x0 in starting_positions ]
+        if self.n_processes == 1:
+            results = [ self.launch_bfgs(x0) for x0 in starting_positions ]
+        else:
+            workers = Pool(self.n_processes)
+            results = workers.map(self.launch_bfgs, starting_positions)
         # extract best solution
-        solution, funcval = sorted(results, key = lambda x : x[1])[0][:2]
-        if hasattr(funcval, '__len__'): funcval = funcval[0]
+        best_result = sorted(results, key = lambda x : float(x[1]))[0]
+        solution = best_result[0]
+        funcval = float(best_result[1])
         return solution, funcval
 
-    def propose_evaluation(self, bfgs = False):
+    def propose_evaluation(self):
         """
         Request a proposed location for the next evaluation. This proposal is
         selected by maximising the chosen acquisition function.
@@ -1232,7 +1326,7 @@ class GpOptimiser(object):
 
         :return: location of the next proposed evaluation.
         """
-        if bfgs:
+        if self.optimizer == 'bfgs':
             # find the evaluation point which maximises the acquisition function
             proposed_ev, max_acq = self.multistart_bfgs()
         else:
